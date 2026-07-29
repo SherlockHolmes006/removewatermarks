@@ -1,0 +1,16 @@
+{
+  "name": "watermark-remover",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @watermark-remover/core && npm run build -w @watermark-remover/web",
+    "dev": "npm run dev -w @watermark-remover/web",
+    "cli": "npm run start -w @watermark-remover/cli"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

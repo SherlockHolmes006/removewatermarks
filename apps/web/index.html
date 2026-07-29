@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>去水印工具 · 本地处理</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <h1>去水印工具</h1>
+        <p class="subtitle">纯本地处理，图片不会上传到任何服务器</p>
+      </header>
+
+      <section class="toolbar">
+        <label class="btn btn-primary">
+          选择图片
+          <input type="file" id="fileInput" accept="image/*" hidden />
+        </label>
+        <button id="btnAuto" class="btn" disabled>自动检测水印</button>
+        <button id="btnBrush" class="btn" disabled>画笔标记</button>
+        <button id="btnEraser" class="btn" disabled>橡皮擦</button>
+        <label class="control">
+          笔刷
+          <input type="range" id="brushSize" min="4" max="48" value="16" />
+        </label>
+        <label class="control">
+          检测灵敏度
+          <input type="range" id="sensitivity" min="0" max="100" value="50" />
+        </label>
+        <button id="btnProcess" class="btn btn-accent" disabled>开始去水印</button>
+        <button id="btnDownload" class="btn" disabled>下载结果</button>
+        <button id="btnReset" class="btn btn-ghost" disabled>重置</button>
+      </section>
+
+      <section class="canvas-area">
+        <div class="panel">
+          <h2>原图 / 标记</h2>
+          <div class="canvas-wrap">
+            <canvas id="canvasSource"></canvas>
+            <canvas id="canvasMask" class="mask-layer"></canvas>
+          </div>
+          <p class="hint" id="hint">上传图片后，可自动检测或手动画笔标记水印区域</p>
+        </div>
+        <div class="panel">
+          <h2>处理结果</h2>
+          <div class="canvas-wrap">
+            <canvas id="canvasResult"></canvas>
+          </div>
+          <p class="status" id="status"></p>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <code>@watermark-remover/core</code> — 可集成到 Web / React Native / Node
+      </footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

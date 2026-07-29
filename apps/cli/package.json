@@ -1,0 +1,16 @@
+{
+  "name": "@watermark-remover/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "remove-watermark": "./bin/remove-watermark.js"
+  },
+  "scripts": {
+    "start": "node bin/remove-watermark.js"
+  },
+  "dependencies": {
+    "@watermark-remover/core": "*",
+    "sharp": "^0.33.5"
+  }
+}
