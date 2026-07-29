@@ -103,20 +103,33 @@ body {
   outline-offset: 1px;
 }
 
+/* Ready-to-download state */
+#btnDownload:not(:disabled) {
+  background: #f4b6c2;
+  border-color: #f4b6c2;
+  color: #3a1f28;
+  font-weight: 600;
+}
+
+#btnDownload:not(:disabled):hover {
+  background: #f7c5ce;
+  border-color: #f7c5ce;
+}
+
 .control {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 0.8rem;
+  font-size: 0.95rem;
   color: var(--muted);
 }
 
-/* Thin slider (override OS default fat track) */
+/* Slider: white track, slightly thicker */
 .control input[type="range"] {
   -webkit-appearance: none;
   appearance: none;
-  width: 90px;
-  height: 14px;
+  width: 96px;
+  height: 16px;
   background: transparent;
   padding: 0;
   margin: 0;
@@ -124,17 +137,17 @@ body {
 }
 
 .control input[type="range"]::-webkit-slider-runnable-track {
-  height: 3px;
+  height: 5px;
   border-radius: 999px;
-  background: #3a4154;
+  background: #ffffff;
 }
 
 .control input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 12px;
-  height: 12px;
-  margin-top: -4.5px;
+  width: 13px;
+  height: 13px;
+  margin-top: -4px;
   border-radius: 50%;
   background: var(--primary);
   border: none;
@@ -142,15 +155,15 @@ body {
 }
 
 .control input[type="range"]::-moz-range-track {
-  height: 3px;
+  height: 5px;
   border-radius: 999px;
-  background: #3a4154;
+  background: #ffffff;
   border: none;
 }
 
 .control input[type="range"]::-moz-range-thumb {
-  width: 12px;
-  height: 12px;
+  width: 13px;
+  height: 13px;
   border-radius: 50%;
   background: var(--primary);
   border: none;
