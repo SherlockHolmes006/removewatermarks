@@ -1,0 +1,50 @@
+# 自动部署配置清单（按顺序做）
+#
+# 仓库: https://github.com/SherlockHolmes006/removewatermarks
+# 工作流: .github/workflows/deploy.yml
+#
+# ========== 1. 在你自己电脑生成「只用于部署」的 SSH 密钥 ==========
+#
+# Windows PowerShell:
+#   ssh-keygen -t ed25519 -C "github-deploy-removewatermarks" -f $env:USERPROFILE\.ssh\deploy_removewatermarks -N '""'
+#
+# 会生成两个文件:
+#   %USERPROFILE%\.ssh\deploy_removewatermarks      ← 私钥（给 GitHub Secret）
+#   %USERPROFILE%\.ssh\deploy_removewatermarks.pub  ← 公钥（放到服务器）
+#
+# ========== 2. 把公钥放进云服务器 ==========
+#
+# SSH 登录服务器后执行（把下面公钥内容换成 .pub 文件里的一行）:
+#   mkdir -p ~/.ssh
+#   chmod 700 ~/.ssh
+#   echo "公钥整行粘贴这里" >> ~/.ssh/authorized_keys
+#   chmod 600 ~/.ssh/authorized_keys
+#
+# 并确保站点目录存在、Nginx 指向它:
+#   sudo mkdir -p /var/www/remove-watermark
+#   sudo chown -R $USER:$USER /var/www/remove-watermark
+#
+# ========== 3. 在 GitHub 添加 Secrets ==========
+#
+# 打开:
+#   https://github.com/SherlockHolmes006/removewatermarks/settings/secrets/actions
+# 点 "New repository secret"，逐个添加:
+#
+#   SSH_HOST          = 你的服务器公网 IP 或域名
+#   SSH_USER          = SSH 用户名（如 root / ubuntu / www）
+#   SSH_PRIVATE_KEY   = 私钥文件全文（deploy_removewatermarks 里从 -----BEGIN 到 END-----）
+#   WEB_ROOT          = /var/www/remove-watermark
+#   SSH_PORT          = 22   （若改过 SSH 端口再填；默认可省略）
+#
+# ========== 4. 触发自动部署 ==========
+#
+# 本地改完代码后:
+#   git add .
+#   git commit -m "说明本次改动"
+#   git push origin main
+#
+# 然后打开:
+#   https://github.com/SherlockHolmes006/removewatermarks/actions
+# 看到 Deploy Web 变绿 = 已同步到你的网站。
+#
+# 也可在 Actions 页点 "Run workflow" 手动部署一次做验证。
