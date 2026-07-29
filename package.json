@@ -8,7 +8,8 @@
   "scripts": {
     "build": "npm run build -w @watermark-remover/core && npm run build -w @watermark-remover/web",
     "dev": "npm run dev -w @watermark-remover/web",
-    "cli": "npm run start -w @watermark-remover/cli"
+    "cli": "npm run start -w @watermark-remover/cli",
+    "deploy": "bash scripts/deploy.sh"
   },
   "engines": {
     "node": ">=18"

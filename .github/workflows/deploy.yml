@@ -1,0 +1,48 @@
+# Push 到 main 后自动构建，并通过 SSH 同步到云服务器
+#
+# 首次使用前，在 GitHub 仓库 Settings → Secrets and variables → Actions 添加：
+#   SSH_HOST          服务器公网 IP 或域名
+#   SSH_USER          SSH 登录用户名（如 root / ubuntu）
+#   SSH_PRIVATE_KEY   用于部署的私钥全文（建议单独部署密钥）
+#   SSH_PORT          可选，默认 22
+#   WEB_ROOT          可选，Nginx 站点目录，默认 /var/www/remove-watermark
+#
+# 服务器需已安装：git、Node.js >= 18、rsync、nginx
+
+name: Deploy Web
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install & build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload dist to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          source: "apps/web/dist/*"
+          target: ${{ secrets.WEB_ROOT || '/var/www/remove-watermark' }}
+          strip_components: 3
+          overwrite: true
+          rm: true

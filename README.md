@@ -113,6 +113,62 @@ your-app/
 - **修复**：轻量扩散 inpainting（Telea / NS 风格），大图自动多尺度处理
 - **局限**：复杂水印、大面积覆盖效果有限；手动画笔标记可显著提升效果
 
+## 版本维护与部署
+
+推荐流程：`本地改代码 → commit → push GitHub → 服务器自动/手动更新`。
+
+### 1. 本地首次关联 GitHub
+
+```bash
+git init
+git add .
+git commit -m "chore: initial commit"
+git branch -M main
+git remote add origin https://github.com/<你的用户名>/<仓库名>.git
+git push -u origin main
+```
+
+日常更新：
+
+```bash
+git add .
+git commit -m "feat: 说明本次改动"
+git push
+```
+
+发版本（可选）：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+### 2. 服务器手动部署
+
+在云服务器克隆仓库后：
+
+```bash
+cd /opt/RemoveWatermarks          # 或你的源码目录
+chmod +x scripts/deploy.sh
+WEB_ROOT=/var/www/remove-watermark ./scripts/deploy.sh
+```
+
+Nginx 示例配置见 `scripts/nginx.remove-watermark.conf.example`。
+
+### 3. GitHub Actions 自动部署
+
+仓库已包含 `.github/workflows/deploy.yml`。在 GitHub → Settings → Secrets 添加：
+
+| Secret | 含义 |
+|--------|------|
+| `SSH_HOST` | 服务器 IP / 域名 |
+| `SSH_USER` | SSH 用户名 |
+| `SSH_PRIVATE_KEY` | 部署用私钥 |
+| `SSH_PORT` | 可选，默认 22 |
+| `WEB_ROOT` | 可选，默认 `/var/www/remove-watermark` |
+
+之后每次 `push` 到 `main`，会自动构建并把 `apps/web/dist` 同步到服务器。
+
 ## 许可
 
 MIT
