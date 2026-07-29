@@ -2,149 +2,153 @@ import type { AutoDetectOptions, MaskBuffer, RawImage } from "./types.js";
 import { createEmptyMask, dilateMask } from "./image-utils.js";
 
 /**
- * Multi-strategy watermark detection:
- * 1) light / gray translucent overlays
- * 2) soft text-like edges (logos, colored captions)
- * 3) mild color-cast overlays
- *
- * Prefer typical watermark zones (edges + bottom band), then fall back to full image.
+ * Conservative watermark detection based on residual vs. local blur.
+ * Avoids marking real image edges (which caused whole-image blur after inpaint).
  */
 export function detectWatermarkMask(image: RawImage, options: AutoDetectOptions = {}): MaskBuffer {
-  const sensitivity = clamp01(options.sensitivity ?? 0.55);
-  const edgeOnly = options.edgeOnly ?? true;
-  const edgeRatio = options.edgeRatio ?? 0.35;
+  const sensitivity = clamp01(options.sensitivity ?? 0.5);
+  const edgeOnly = options.edgeOnly ?? false;
+  const edgeRatio = options.edgeRatio ?? 0.4;
 
-  const { width, height } = image;
-  const zoneMask = buildScanZone(width, height, edgeOnly, edgeRatio);
-
-  let mask = detectInZone(image, zoneMask, sensitivity);
-
-  // If nothing found on edges, scan the whole image once (common for center logos).
-  if (edgeOnly && countMask(mask) < Math.max(64, (width * height) * 0.00005)) {
-    const fullZone = new Uint8Array(width * height).fill(1);
-    mask = detectInZone(image, fullZone, Math.min(1, sensitivity + 0.12));
-  }
-
-  const dilateRadius = sensitivity > 0.7 ? 3 : sensitivity > 0.45 ? 2 : 1;
-  return dilateMask(mask, width, height, dilateRadius);
-}
-
-function detectInZone(image: RawImage, zone: Uint8Array, sensitivity: number): MaskBuffer {
   const { width, height, data } = image;
-  const mask = createEmptyMask(width, height);
+  const n = width * height;
 
-  const lum = new Float32Array(width * height);
-  const sat = new Float32Array(width * height);
-  for (let i = 0; i < width * height; i++) {
+  const rCh = new Float32Array(n);
+  const gCh = new Float32Array(n);
+  const bCh = new Float32Array(n);
+  const lum = new Float32Array(n);
+
+  for (let i = 0; i < n; i++) {
     const o = i * 4;
-    const r = data[o] / 255;
-    const g = data[o + 1] / 255;
-    const b = data[o + 2] / 255;
-    lum[i] = 0.299 * r + 0.587 * g + 0.114 * b;
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    sat[i] = max === 0 ? 0 : (max - min) / max;
+    rCh[i] = data[o] / 255;
+    gCh[i] = data[o + 1] / 255;
+    bCh[i] = data[o + 2] / 255;
+    lum[i] = 0.299 * rCh[i] + 0.587 * gCh[i] + 0.114 * bCh[i];
   }
 
-  // Soft edge map (Sobel magnitude) — logos/text leave moderate edges.
-  const edges = sobelMagnitude(lum, width, height);
+  // Large blur ≈ background without thin watermark strokes.
+  const blurRadius = Math.max(8, Math.round(Math.min(width, height) * 0.012));
+  const blurLum = boxBlur(lum, width, height, blurRadius);
+  const blurR = boxBlur(rCh, width, height, blurRadius);
+  const blurG = boxBlur(gCh, width, height, blurRadius);
+  const blurB = boxBlur(bCh, width, height, blurRadius);
 
-  const lightLumMin = 0.55 - sensitivity * 0.2;
-  const lightSatMax = 0.22 + (1 - sensitivity) * 0.1;
-  const edgeLo = 0.02 + (1 - sensitivity) * 0.02;
-  const edgeHi = 0.35 + sensitivity * 0.25;
-  const castSatMin = 0.08;
-  const castSatMax = 0.55;
-  const flatVarMax = 0.004 + (1 - sensitivity) * 0.006;
+  const zone = buildScanZone(width, height, edgeOnly, edgeRatio);
+  const scores = new Float32Array(n);
 
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const idx = y * width + x;
-      if (!zone[idx]) continue;
+  // Higher sensitivity → lower residual threshold, slightly higher coverage.
+  const resLo = 0.018 - sensitivity * 0.008;
+  const resHi = 0.14 + sensitivity * 0.06;
+  const maxCoverage = 0.025 + sensitivity * 0.055; // ~2.5% … 8%
 
-      const l = lum[idx];
-      const s = sat[idx];
-      const e = edges[idx];
-      const localVar = localVariance(lum, width, height, x, y, 2);
+  for (let i = 0; i < n; i++) {
+    if (!zone[i]) continue;
 
-      // 1) Pale / white translucent stamp
-      const isLightOverlay = l > lightLumMin && s < lightSatMax && localVar < flatVarMax * 2;
+    const dL = lum[i] - blurLum[i];
+    const dR = rCh[i] - blurR[i];
+    const dG = gCh[i] - blurG[i];
+    const dB = bCh[i] - blurB[i];
+    const res = Math.sqrt(dR * dR + dG * dG + dB * dB);
 
-      // 2) Text-like soft edges (works for colored logos like blue captions)
-      const isTextStroke =
-        e > edgeLo &&
-        e < edgeHi &&
-        localVar < 0.02 + sensitivity * 0.02 &&
-        l > 0.12 &&
-        l < 0.95;
+    // Watermark strokes are usually a mild lift/tint over background, not hard object edges.
+    if (res < resLo || res > resHi) continue;
 
-      // 3) Mild color cast (semi-transparent brand color)
-      const isColorCast =
-        s > castSatMin &&
-        s < castSatMax &&
-        e > edgeLo * 0.6 &&
-        e < edgeHi &&
-        localVar < 0.015 + sensitivity * 0.01;
+    // Prefer pale / tinted overlays (white, gray, pink, light blue logos).
+    const paleLift = dL > 0.008 && dL < 0.18;
+    const tinted =
+      Math.abs(dR - dG) < 0.08 &&
+      Math.abs(dG - dB) < 0.08 &&
+      res > resLo;
 
-      // 4) Flat pale plate often used behind logos
-      const isFlatPlate = localVar < flatVarMax && l > 0.45 + (1 - sensitivity) * 0.15 && s < 0.25;
+    // Soft pink/red brand watermarks (common tiled diagonal text).
+    const pinkish = dR > dG + 0.004 && dR > dB + 0.004 && dL > 0 && res < resHi;
 
-      if (isLightOverlay || isTextStroke || isColorCast || isFlatPlate) {
-        mask[idx] = 255;
-      }
-    }
+    // Soft blue brand watermarks.
+    const blueish = dB > dR + 0.004 && dB > dG + 0.002 && res < resHi;
+
+    if (!(paleLift || tinted || pinkish || blueish)) continue;
+
+    // Suppress strong photographic edges: local contrast of blur should stay moderate.
+    const localBlurVar = sampleVar(blurLum, width, height, i % width, (i / width) | 0, 3);
+    if (localBlurVar > 0.012 + sensitivity * 0.01) continue;
+
+    // Score: mid residual + pale/tint preference.
+    let score = res;
+    if (paleLift) score += 0.02;
+    if (pinkish || blueish) score += 0.015;
+    scores[i] = score;
   }
 
-  return pruneNoise(mask, width, height, sensitivity);
+  const mask = thresholdByCoverage(scores, width, height, maxCoverage);
+  const pruned = pruneNoise(mask, width, height, sensitivity);
+  const dilateRadius = sensitivity > 0.75 ? 2 : 1;
+  return dilateMask(pruned, width, height, dilateRadius);
 }
 
-function buildScanZone(width: number, height: number, edgeOnly: boolean, edgeRatio: number): Uint8Array {
-  const zone = new Uint8Array(width * height);
-  if (!edgeOnly) {
-    zone.fill(1);
-    return zone;
+/** Keep only the highest-scoring pixels up to maxCoverage of the image. */
+function thresholdByCoverage(
+  scores: Float32Array,
+  width: number,
+  height: number,
+  maxCoverage: number
+): MaskBuffer {
+  const n = width * height;
+  const indexed: { i: number; s: number }[] = [];
+  for (let i = 0; i < n; i++) {
+    if (scores[i] > 0) indexed.push({ i, s: scores[i] });
   }
 
-  const band = Math.max(24, Math.floor(Math.min(width, height) * edgeRatio));
-  const bottomBand = Math.max(band, Math.floor(height * 0.28));
+  const mask = createEmptyMask(width, height);
+  if (indexed.length === 0) return mask;
 
+  indexed.sort((a, b) => b.s - a.s);
+  const budget = Math.max(32, Math.floor(n * maxCoverage));
+  const keep = Math.min(budget, indexed.length);
+  for (let k = 0; k < keep; k++) {
+    mask[indexed[k].i] = 255;
+  }
+  return mask;
+}
+
+function boxBlur(src: Float32Array, width: number, height: number, radius: number): Float32Array {
+  const tmp = new Float32Array(src.length);
+  const out = new Float32Array(src.length);
+  const r = Math.max(1, radius);
+
+  // Horizontal
   for (let y = 0; y < height; y++) {
+    let sum = 0;
+    const row = y * width;
+    for (let x = -r; x <= r; x++) {
+      sum += src[row + clamp(x, 0, width - 1)];
+    }
     for (let x = 0; x < width; x++) {
-      const onEdge = x < band || y < band || x >= width - band || y >= height - band;
-      const onBottom = y >= height - bottomBand;
-      if (onEdge || onBottom) zone[y * width + x] = 1;
+      tmp[row + x] = sum / (r * 2 + 1);
+      const remove = src[row + clamp(x - r, 0, width - 1)];
+      const add = src[row + clamp(x + r + 1, 0, width - 1)];
+      sum += add - remove;
     }
   }
-  return zone;
-}
 
-function sobelMagnitude(lum: Float32Array, width: number, height: number): Float32Array {
-  const out = new Float32Array(width * height);
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const i = y * width + x;
-      const gx =
-        -lum[i - width - 1] -
-        2 * lum[i - 1] -
-        lum[i + width - 1] +
-        lum[i - width + 1] +
-        2 * lum[i + 1] +
-        lum[i + width + 1];
-      const gy =
-        -lum[i - width - 1] -
-        2 * lum[i - width] -
-        lum[i - width + 1] +
-        lum[i + width - 1] +
-        2 * lum[i + width] +
-        lum[i + width + 1];
-      out[i] = Math.sqrt(gx * gx + gy * gy);
+  // Vertical
+  for (let x = 0; x < width; x++) {
+    let sum = 0;
+    for (let y = -r; y <= r; y++) {
+      sum += tmp[clamp(y, 0, height - 1) * width + x];
+    }
+    for (let y = 0; y < height; y++) {
+      out[y * width + x] = sum / (r * 2 + 1);
+      const remove = tmp[clamp(y - r, 0, height - 1) * width + x];
+      const add = tmp[clamp(y + r + 1, 0, height - 1) * width + x];
+      sum += add - remove;
     }
   }
+
   return out;
 }
 
-function localVariance(
-  lum: Float32Array,
+function sampleVar(
+  field: Float32Array,
   width: number,
   height: number,
   cx: number,
@@ -159,7 +163,7 @@ function localVariance(
       const x = cx + dx;
       const y = cy + dy;
       if (x < 0 || y < 0 || x >= width || y >= height) continue;
-      const v = lum[y * width + x];
+      const v = field[y * width + x];
       sum += v;
       sumSq += v * v;
       count++;
@@ -170,9 +174,29 @@ function localVariance(
   return sumSq / count - mean * mean;
 }
 
-/** Drop tiny speckles; keep stroke-like / blob regions. */
+function buildScanZone(width: number, height: number, edgeOnly: boolean, edgeRatio: number): Uint8Array {
+  const zone = new Uint8Array(width * height);
+  if (!edgeOnly) {
+    zone.fill(1);
+    return zone;
+  }
+
+  const band = Math.max(24, Math.floor(Math.min(width, height) * edgeRatio));
+  const bottomBand = Math.max(band, Math.floor(height * 0.3));
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (x < band || y < band || x >= width - band || y >= height - band || y >= height - bottomBand) {
+        zone[y * width + x] = 1;
+      }
+    }
+  }
+  return zone;
+}
+
 function pruneNoise(mask: MaskBuffer, width: number, height: number, sensitivity: number): MaskBuffer {
-  const minArea = Math.max(12, Math.floor((1.2 - sensitivity) * 40));
+  const minArea = Math.max(8, Math.floor((1.1 - sensitivity) * 28));
+  const maxArea = Math.floor(width * height * 0.12);
   const visited = new Uint8Array(mask.length);
   const out = createEmptyMask(width, height);
   const stack: number[] = [];
@@ -204,7 +228,8 @@ function pruneNoise(mask: MaskBuffer, width: number, height: number, sensitivity
       }
     }
 
-    if (component.length >= minArea) {
+    // Drop speckles and giant blobs (usually false positives on UI panels).
+    if (component.length >= minArea && component.length <= maxArea) {
       for (const idx of component) out[idx] = 255;
     }
   }
@@ -212,10 +237,8 @@ function pruneNoise(mask: MaskBuffer, width: number, height: number, sensitivity
   return out;
 }
 
-function countMask(mask: MaskBuffer): number {
-  let n = 0;
-  for (let i = 0; i < mask.length; i++) if (mask[i]) n++;
-  return n;
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v));
 }
 
 function clamp01(v: number): number {

@@ -190,34 +190,26 @@ btnAuto.addEventListener("click", () => {
   setTool(null);
   btnAuto.disabled = true;
   setStatus("正在自动检测水印…");
-  hint.textContent = "检测中，请稍候";
+  hint.textContent = "检测中，请稍候（仅标记红色区域，不会直接处理）";
 
-  // Yield to UI so status text paints before heavy CPU work.
   requestAnimationFrame(() => {
     try {
       const sens = Number(sensitivity.value) / 100;
-      let mask = remover.detectMask(sourceImage!, {
+      // Full-image residual detect; coverage is capped inside core to avoid blur.
+      const mask = remover.detectMask(sourceImage!, {
         sensitivity: sens,
-        edgeOnly: true,
-        edgeRatio: 0.35,
+        edgeOnly: false,
       });
-      let count = mask.reduce((n, v) => n + (v > 0 ? 1 : 0), 0);
-
-      // Stronger full-image pass if edge scan found almost nothing.
-      if (count < 80) {
-        mask = remover.detectMask(sourceImage!, {
-          sensitivity: Math.min(1, sens + 0.2),
-          edgeOnly: false,
-        });
-        count = mask.reduce((n, v) => n + (v > 0 ? 1 : 0), 0);
-      }
+      const count = mask.reduce((n, v) => n + (v > 0 ? 1 : 0), 0);
+      const coverage = count / (sourceImage!.width * sourceImage!.height);
 
       userMask = mask;
       renderMaskOverlay(mask);
+      clearResult();
 
       if (count > 0) {
-        hint.textContent = `已检测到约 ${count.toLocaleString()} 个像素的水印区域（红色半透明）。可再用画笔/橡皮微调`;
-        setStatus(`自动检测完成：标记了 ${count.toLocaleString()} 像素`, "ok");
+        hint.textContent = `已标记约 ${count.toLocaleString()} 像素（占比 ${(coverage * 100).toFixed(1)}%）。请用画笔/橡皮微调后，再点「开始去水印」`;
+        setStatus(`自动检测完成：已标记 ${(coverage * 100).toFixed(1)}% 区域（未处理）`, "ok");
       } else {
         hint.textContent =
           "未检测到明显水印。请调高「检测灵敏度」后重试，或用手动画笔涂选水印";
@@ -279,16 +271,27 @@ btnProcess.addEventListener("click", () => {
   requestAnimationFrame(() => {
     try {
       const hasUserMask = !!(userMask && userMask.some((v) => v > 0));
-      const mask = hasUserMask
-        ? userMask!
-        : remover.detectMask(sourceImage!, {
-            sensitivity: Number(sensitivity.value) / 100,
-            edgeOnly: false,
-          });
-
       if (!hasUserMask) {
-        userMask = mask;
-        renderMaskOverlay(mask);
+        setStatus("请先「自动检测」或用画笔标记水印区域", "err");
+        hint.textContent = "未标记水印区域，已取消处理，以免误伤整张图";
+        btnProcess.disabled = false;
+        return;
+      }
+
+      const mask = userMask!;
+      const coverage =
+        mask.reduce((n, v) => n + (v > 0 ? 1 : 0), 0) /
+        (sourceImage!.width * sourceImage!.height);
+
+      // Guard: huge masks make diffusion inpaint look like a full-image blur.
+      if (coverage > 0.18) {
+        setStatus(
+          `标记区域过大（${(coverage * 100).toFixed(0)}%），已取消处理。请用橡皮擦缩小标记后再试`,
+          "err"
+        );
+        hint.textContent = "标记超过 18% 容易把整图抹糊，请缩小红色区域后重试";
+        btnProcess.disabled = false;
+        return;
       }
 
       const { image, elapsedMs } = remover.remove(sourceImage!, { mask });
@@ -319,16 +322,17 @@ btnDownload.addEventListener("click", () => {
 });
 
 btnReset.addEventListener("click", () => {
-  sourceImage = null;
-  userMask = null;
+  if (!sourceImage) return;
+
+  // Keep the uploaded image; only clear marks / result so user can edit again.
+  userMask = new Uint8Array(sourceImage.width * sourceImage.height);
   resultImage = null;
   lastPoint = null;
-  fileInput.value = "";
+  isPainting = false;
   setTool(null);
-  enableControls(false);
-  btnDownload.disabled = true;
   clearMaskOverlay();
   clearResult();
-  hint.textContent = "上传图片后，可自动检测或手动画笔标记水印区域";
-  setStatus("");
+  enableControls(true);
+  hint.textContent = "已重置此图的标记与结果，可继续自动检测或画笔标记";
+  setStatus("已重置当前图片的标记", "ok");
 });
