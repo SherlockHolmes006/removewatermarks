@@ -22,7 +22,8 @@ const canvasMask = document.getElementById("canvasMask") as HTMLCanvasElement;
 const canvasResult = document.getElementById("canvasResult") as HTMLCanvasElement;
 const hint = document.getElementById("hint") as HTMLParagraphElement;
 const status = document.getElementById("status") as HTMLParagraphElement;
-const canvasWrap = canvasSource.parentElement as HTMLDivElement;
+const canvasStage = canvasSource.parentElement as HTMLDivElement;
+const canvasWrap = canvasStage.parentElement as HTMLDivElement;
 
 let sourceImage: RawImage | null = null;
 let userMask: MaskBuffer | null = null;
@@ -30,6 +31,7 @@ let resultImage: RawImage | null = null;
 let drawing = false;
 let tool: "brush" | "eraser" | null = null;
 let isPainting = false;
+let lastPoint: { x: number; y: number } | null = null;
 
 function setStatus(text: string, type: "ok" | "err" | "" = "") {
   status.textContent = text;
@@ -64,10 +66,12 @@ function loadImageToCanvas(file: File) {
     userMask = new Uint8Array(w * h);
     clearMaskOverlay();
     clearResult();
+    lastPoint = null;
 
     enableControls(true);
     hint.textContent = "可「自动检测」或切换到「画笔标记」手动涂选水印区域";
     setStatus("");
+    URL.revokeObjectURL(img.src);
   };
   img.src = URL.createObjectURL(file);
 }
@@ -101,38 +105,78 @@ function renderMaskOverlay(mask: MaskBuffer) {
 
 function getCanvasPoint(e: PointerEvent): { x: number; y: number } {
   const rect = canvasMask.getBoundingClientRect();
-  const scaleX = canvasMask.width / rect.width;
-  const scaleY = canvasMask.height / rect.height;
+  const scaleX = canvasMask.width / Math.max(1, rect.width);
+  const scaleY = canvasMask.height / Math.max(1, rect.height);
   return {
-    x: Math.floor((e.clientX - rect.left) * scaleX),
-    y: Math.floor((e.clientY - rect.top) * scaleY),
+    x: Math.round((e.clientX - rect.left) * scaleX),
+    y: Math.round((e.clientY - rect.top) * scaleY),
   };
 }
 
-function paintAt(x: number, y: number) {
+/** Stamp a circular brush dab into the mask buffer (no redraw). */
+function stampAt(x: number, y: number) {
   if (!userMask || !sourceImage) return;
   const r = Number(brushSize.value);
+  const r2 = r * r;
   const { width, height } = sourceImage;
   const value = tool === "eraser" ? 0 : 255;
 
-  for (let dy = -r; dy <= r; dy++) {
-    for (let dx = -r; dx <= r; dx++) {
-      if (dx * dx + dy * dy > r * r) continue;
-      const px = x + dx;
-      const py = y + dy;
-      if (px < 0 || py < 0 || px >= width || py >= height) continue;
+  const x0 = Math.max(0, Math.floor(x - r));
+  const x1 = Math.min(width - 1, Math.ceil(x + r));
+  const y0 = Math.max(0, Math.floor(y - r));
+  const y1 = Math.min(height - 1, Math.ceil(y + r));
+
+  for (let py = y0; py <= y1; py++) {
+    for (let px = x0; px <= x1; px++) {
+      const dx = px - x;
+      const dy = py - y;
+      if (dx * dx + dy * dy > r2) continue;
       userMask[py * width + px] = value;
     }
   }
+}
+
+/**
+ * Interpolate between last and current point so fast pointer moves stay continuous.
+ * Spacing is a fraction of brush radius to avoid gaps.
+ */
+function paintStrokeTo(x: number, y: number) {
+  if (!userMask || !sourceImage) return;
+
+  if (!lastPoint) {
+    stampAt(x, y);
+    lastPoint = { x, y };
+    renderMaskOverlay(userMask);
+    return;
+  }
+
+  const dx = x - lastPoint.x;
+  const dy = y - lastPoint.y;
+  const dist = Math.hypot(dx, dy);
+  const spacing = Math.max(1, Number(brushSize.value) * 0.35);
+  const steps = Math.max(1, Math.ceil(dist / spacing));
+
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    stampAt(
+      Math.round(lastPoint.x + dx * t),
+      Math.round(lastPoint.y + dy * t)
+    );
+  }
+
+  lastPoint = { x, y };
   renderMaskOverlay(userMask);
 }
 
 function setTool(next: "brush" | "eraser" | null) {
   tool = next;
   drawing = next !== null;
+  lastPoint = null;
   btnBrush.classList.toggle("active", next === "brush");
   btnEraser.classList.toggle("active", next === "eraser");
   canvasWrap.classList.toggle("drawing", drawing);
+  canvasMask.style.pointerEvents = drawing ? "auto" : "none";
+  canvasMask.style.cursor = drawing ? "crosshair" : "default";
 }
 
 fileInput.addEventListener("change", () => {
@@ -142,11 +186,49 @@ fileInput.addEventListener("change", () => {
 
 btnAuto.addEventListener("click", () => {
   if (!sourceImage) return;
-  const sens = Number(sensitivity.value) / 100;
-  userMask = remover.detectMask(sourceImage, { sensitivity: sens, edgeOnly: true });
-  renderMaskOverlay(userMask);
-  const count = userMask.filter((v) => v > 0).length;
-  hint.textContent = count > 0 ? `已检测到约 ${count} 个像素的水印区域` : "未检测到明显水印，请尝试手动画笔标记";
+
+  setTool(null);
+  btnAuto.disabled = true;
+  setStatus("正在自动检测水印…");
+  hint.textContent = "检测中，请稍候";
+
+  // Yield to UI so status text paints before heavy CPU work.
+  requestAnimationFrame(() => {
+    try {
+      const sens = Number(sensitivity.value) / 100;
+      let mask = remover.detectMask(sourceImage!, {
+        sensitivity: sens,
+        edgeOnly: true,
+        edgeRatio: 0.35,
+      });
+      let count = mask.reduce((n, v) => n + (v > 0 ? 1 : 0), 0);
+
+      // Stronger full-image pass if edge scan found almost nothing.
+      if (count < 80) {
+        mask = remover.detectMask(sourceImage!, {
+          sensitivity: Math.min(1, sens + 0.2),
+          edgeOnly: false,
+        });
+        count = mask.reduce((n, v) => n + (v > 0 ? 1 : 0), 0);
+      }
+
+      userMask = mask;
+      renderMaskOverlay(mask);
+
+      if (count > 0) {
+        hint.textContent = `已检测到约 ${count.toLocaleString()} 个像素的水印区域（红色半透明）。可再用画笔/橡皮微调`;
+        setStatus(`自动检测完成：标记了 ${count.toLocaleString()} 像素`, "ok");
+      } else {
+        hint.textContent =
+          "未检测到明显水印。请调高「检测灵敏度」后重试，或用手动画笔涂选水印";
+        setStatus("自动检测未找到水印，请手动画笔标记", "err");
+      }
+    } catch (err) {
+      setStatus(`检测失败: ${err instanceof Error ? err.message : String(err)}`, "err");
+    } finally {
+      btnAuto.disabled = false;
+    }
+  });
 });
 
 btnBrush.addEventListener("click", () => setTool(tool === "brush" ? null : "brush"));
@@ -154,20 +236,37 @@ btnEraser.addEventListener("click", () => setTool(tool === "eraser" ? null : "er
 
 canvasMask.addEventListener("pointerdown", (e) => {
   if (!drawing) return;
+  e.preventDefault();
   isPainting = true;
   canvasMask.setPointerCapture(e.pointerId);
+  lastPoint = null;
   const { x, y } = getCanvasPoint(e);
-  paintAt(x, y);
+  paintStrokeTo(x, y);
 });
 
 canvasMask.addEventListener("pointermove", (e) => {
   if (!isPainting || !drawing) return;
+  e.preventDefault();
   const { x, y } = getCanvasPoint(e);
-  paintAt(x, y);
+  paintStrokeTo(x, y);
 });
 
-canvasMask.addEventListener("pointerup", () => {
+function endStroke(e: PointerEvent) {
+  if (!isPainting) return;
   isPainting = false;
+  lastPoint = null;
+  try {
+    canvasMask.releasePointerCapture(e.pointerId);
+  } catch {
+    /* already released */
+  }
+}
+
+canvasMask.addEventListener("pointerup", endStroke);
+canvasMask.addEventListener("pointercancel", endStroke);
+canvasMask.addEventListener("lostpointercapture", () => {
+  isPainting = false;
+  lastPoint = null;
 });
 
 btnProcess.addEventListener("click", () => {
@@ -179,12 +278,18 @@ btnProcess.addEventListener("click", () => {
 
   requestAnimationFrame(() => {
     try {
-      const mask =
-        userMask && userMask.some((v) => v > 0)
-          ? userMask
-          : remover.detectMask(sourceImage!, {
-              sensitivity: Number(sensitivity.value) / 100,
-            });
+      const hasUserMask = !!(userMask && userMask.some((v) => v > 0));
+      const mask = hasUserMask
+        ? userMask!
+        : remover.detectMask(sourceImage!, {
+            sensitivity: Number(sensitivity.value) / 100,
+            edgeOnly: false,
+          });
+
+      if (!hasUserMask) {
+        userMask = mask;
+        renderMaskOverlay(mask);
+      }
 
       const { image, elapsedMs } = remover.remove(sourceImage!, { mask });
       resultImage = image;
@@ -217,6 +322,7 @@ btnReset.addEventListener("click", () => {
   sourceImage = null;
   userMask = null;
   resultImage = null;
+  lastPoint = null;
   fileInput.value = "";
   setTool(null);
   enableControls(false);

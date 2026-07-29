@@ -31,7 +31,7 @@ export interface RemoveWatermarkOptions {
 export interface AutoDetectOptions {
   /** Sensitivity 0–1. Higher = more aggressive mask. Default: 0.5 */
   sensitivity?: number;
-  /** Only scan image edges (common watermark placement). Default: true */
+  /** Prefer scanning edges first. Default: true (falls back to full image if empty). */
   edgeOnly?: boolean;
   /** Edge band width as fraction of min(width,height). Default: 0.25 */
   edgeRatio?: number;
