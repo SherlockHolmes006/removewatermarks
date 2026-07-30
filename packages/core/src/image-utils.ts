@@ -34,6 +34,76 @@ export function dilateMask(mask: MaskBuffer, width: number, height: number, radi
   return out;
 }
 
+export function erodeMask(mask: MaskBuffer, width: number, height: number, radius = 1): MaskBuffer {
+  if (radius <= 0) return mask;
+  const out = new Uint8Array(mask.length);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let keep = true;
+      for (let dy = -radius; dy <= radius && keep; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height || mask[ny * width + nx] === 0) {
+            keep = false;
+            break;
+          }
+        }
+      }
+      if (keep) out[y * width + x] = 255;
+    }
+  }
+  return out;
+}
+
+/** Dilate then erode — fills small gaps / stroke interiors without growing much. */
+export function closeMask(mask: MaskBuffer, width: number, height: number, radius = 2): MaskBuffer {
+  return erodeMask(dilateMask(mask, width, height, radius), width, height, radius);
+}
+
+/**
+ * Fill enclosed holes inside mask components (turns hollow letter outlines into solid fills).
+ * Background is flood-filled from image borders; remaining zeros inside mask become filled.
+ */
+export function fillMaskHoles(mask: MaskBuffer, width: number, height: number): MaskBuffer {
+  const outside = new Uint8Array(mask.length);
+  const stack: number[] = [];
+
+  const tryPush = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    const i = y * width + x;
+    if (mask[i] > 0 || outside[i]) return;
+    outside[i] = 1;
+    stack.push(i);
+  };
+
+  for (let x = 0; x < width; x++) {
+    tryPush(x, 0);
+    tryPush(x, height - 1);
+  }
+  for (let y = 0; y < height; y++) {
+    tryPush(0, y);
+    tryPush(width - 1, y);
+  }
+
+  while (stack.length) {
+    const cur = stack.pop()!;
+    const x = cur % width;
+    const y = (cur / width) | 0;
+    tryPush(x + 1, y);
+    tryPush(x - 1, y);
+    tryPush(x, y + 1);
+    tryPush(x, y - 1);
+  }
+
+  const out = new Uint8Array(mask.length);
+  for (let i = 0; i < mask.length; i++) {
+    // Keep original mask OR enclosed holes (not reachable from border).
+    out[i] = mask[i] > 0 || outside[i] === 0 ? 255 : 0;
+  }
+  return out;
+}
+
 export function countMaskedPixels(mask: MaskBuffer): number {
   let count = 0;
   for (let i = 0; i < mask.length; i++) {
