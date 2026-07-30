@@ -1,50 +1,122 @@
-# 自动部署配置清单（按顺序做）
-#
+# ============================================================
+# GitHub Actions 自动部署 — 完整跑通清单
 # 仓库: https://github.com/SherlockHolmes006/removewatermarks
 # 工作流: .github/workflows/deploy.yml
+# ============================================================
 #
-# ========== 1. 在你自己电脑生成「只用于部署」的 SSH 密钥 ==========
+# 最终效果：
+#   本地改代码 → git push origin main → Actions 自动构建
+#   → 把 apps/web/dist 上传到云服务器 → 打开你的域名即是新版
 #
-# Windows PowerShell:
+# ------------------------------------------------------------
+# 第 0 步：先弄清「你的网站文件现在在服务器哪」
+# ------------------------------------------------------------
+# SSH 登录服务器后执行（任选能查到的）：
+#
+#   # 若用 Nginx：
+#   sudo nginx -t
+#   grep -R "root " /etc/nginx/sites-enabled/ 2>/dev/null
+#   grep -R "root " /etc/nginx/conf.d/ 2>/dev/null
+#
+#   # 看到类似：root /var/www/xxx;  → 这个路径就是 WEB_ROOT
+#
+# 你以前手动上传的页面，多半就在这个目录里。
+# GitHub Actions 会用构建好的新文件覆盖这个目录（只覆盖网站静态文件）。
+#
+# ------------------------------------------------------------
+# 第 1 步：本机生成「部署专用」SSH 密钥（不要用日常登录密钥硬塞）
+# ------------------------------------------------------------
+# Windows PowerShell：
+#
 #   ssh-keygen -t ed25519 -C "github-deploy-removewatermarks" -f $env:USERPROFILE\.ssh\deploy_removewatermarks -N '""'
 #
-# 会生成两个文件:
-#   %USERPROFILE%\.ssh\deploy_removewatermarks      ← 私钥（给 GitHub Secret）
-#   %USERPROFILE%\.ssh\deploy_removewatermarks.pub  ← 公钥（放到服务器）
+# 生成：
+#   deploy_removewatermarks      ← 私钥 → 贴到 GitHub Secret SSH_PRIVATE_KEY
+#   deploy_removewatermarks.pub  ← 公钥 → 放到服务器 authorized_keys
 #
-# ========== 2. 把公钥放进云服务器 ==========
+# 查看公钥：
+#   Get-Content $env:USERPROFILE\.ssh\deploy_removewatermarks.pub
 #
-# SSH 登录服务器后执行（把下面公钥内容换成 .pub 文件里的一行）:
+# 查看私钥（整段复制，含 BEGIN/END）：
+#   Get-Content $env:USERPROFILE\.ssh\deploy_removewatermarks
+#
+# ------------------------------------------------------------
+# 第 2 步：服务器放入公钥 + 准备站点目录写权限
+# ------------------------------------------------------------
+# SSH 登录服务器后：
+#
 #   mkdir -p ~/.ssh
 #   chmod 700 ~/.ssh
-#   echo "公钥整行粘贴这里" >> ~/.ssh/authorized_keys
+#   echo "这里粘贴 .pub 公钥整行" >> ~/.ssh/authorized_keys
 #   chmod 600 ~/.ssh/authorized_keys
 #
-# 并确保站点目录存在、Nginx 指向它:
-#   sudo mkdir -p /var/www/remove-watermark
-#   sudo chown -R $USER:$USER /var/www/remove-watermark
+#   # WEB_ROOT 换成你第 0 步查到的真实路径
+#   sudo mkdir -p /你的/网站/目录
+#   sudo chown -R $USER:$USER /你的/网站/目录
 #
-# ========== 3. 在 GitHub 添加 Secrets ==========
+# 本机先测 SSH（应免密成功）：
+#   ssh -i $env:USERPROFILE\.ssh\deploy_removewatermarks 用户名@服务器IP
 #
-# 打开:
+# ------------------------------------------------------------
+# 第 3 步：GitHub 填写 Secrets
+# ------------------------------------------------------------
+# 打开：
 #   https://github.com/SherlockHolmes006/removewatermarks/settings/secrets/actions
-# 点 "New repository secret"，逐个添加:
 #
-#   SSH_HOST          = 你的服务器公网 IP 或域名
-#   SSH_USER          = SSH 用户名（如 root / ubuntu / www）
-#   SSH_PRIVATE_KEY   = 私钥文件全文（deploy_removewatermarks 里从 -----BEGIN 到 END-----）
-#   WEB_ROOT          = /var/www/remove-watermark
-#   SSH_PORT          = 22   （若改过 SSH 端口再填；默认可省略）
+# New repository secret，添加：
 #
-# ========== 4. 触发自动部署 ==========
+#   SSH_HOST         = 服务器公网 IP（推荐）或可 SSH 的主机名
+#   SSH_USER         = SSH 用户名（和上一步登录用的一致）
+#   SSH_PRIVATE_KEY  = 私钥全文（deploy_removewatermarks 文件内容）
+#   WEB_ROOT         = 第 0 步的网站根目录（必须填对！）
+#   SSH_PORT         = 22（若改过 SSH 端口再填实际端口；可省略则用默认 22）
 #
-# 本地改完代码后:
-#   git add .
-#   git commit -m "说明本次改动"
+# ------------------------------------------------------------
+# 第 4 步：确认仓库里有工作流文件并推到 main
+# ------------------------------------------------------------
+# 本地应有：.github/workflows/deploy.yml
+#
+#   git add .github/workflows/deploy.yml scripts/AUTO_DEPLOY.txt
+#   git commit -m "chore: ready GitHub Actions deploy"
 #   git push origin main
 #
-# 然后打开:
+# ------------------------------------------------------------
+# 第 5 步：第一次手动跑一次 Actions（验证）
+# ------------------------------------------------------------
+# 打开：
 #   https://github.com/SherlockHolmes006/removewatermarks/actions
-# 看到 Deploy Web 变绿 = 已同步到你的网站。
 #
-# 也可在 Actions 页点 "Run workflow" 手动部署一次做验证。
+# 左侧点 Deploy Web → 右侧 Run workflow → Run workflow
+# 等几分钟：
+#   绿勾 = 成功，打开你的域名硬刷新（Ctrl+F5）应看到新页面
+#   红叉 = 点进去看失败步骤日志（常见：密钥错、WEB_ROOT 错、防火墙拦 22 端口）
+#
+# ------------------------------------------------------------
+# 第 6 步：以后日常上线流程
+# ------------------------------------------------------------
+#   1. 本地改代码，npm run dev 测好
+#   2. git add .
+#   3. git commit -m "说明改了什么"
+#   4. git push origin main
+#   5. 打开 Actions 看 Deploy Web 是否变绿
+#   6. 浏览器打开你的域名，强制刷新
+#
+# ------------------------------------------------------------
+# 常见失败排查
+# ------------------------------------------------------------
+# 1) Permission denied (publickey)
+#    → 公钥没进服务器 authorized_keys，或 SSH_USER 不对，或私钥复制缺行
+#
+# 2) No such file / permission denied 写目录
+#    → WEB_ROOT 路径不对，或该用户对目录无写权限（chown）
+#
+# 3) 部署成功但域名还是旧页面
+#    → Nginx root 不是你填的 WEB_ROOT；或浏览器缓存，Ctrl+F5
+#    → 确认 Actions 上传的是 apps/web/dist（含 index.html）
+#
+# 4) 云服务器安全组
+#    → 放行入站 TCP 22（或你的 SSH_PORT），来源至少允许 GitHub Actions
+#      （若限制 IP，可临时对 0.0.0.0/0 开放 22 做验证，成功后再收紧）
+#
+# 5) Secrets 里 WEB_ROOT 不要末尾乱加空格；路径一般不带最后的 /
+#
