@@ -284,12 +284,12 @@ btnProcess.addEventListener("click", () => {
         (sourceImage!.width * sourceImage!.height);
 
       // Guard: huge masks make diffusion inpaint look like a full-image blur.
-      if (coverage > 0.18) {
+      if (coverage > 0.28) {
         setStatus(
           `标记区域过大（${(coverage * 100).toFixed(0)}%），已取消处理。请用橡皮擦缩小标记后再试`,
           "err"
         );
-        hint.textContent = "标记超过 18% 容易把整图抹糊，请缩小红色区域后重试";
+        hint.textContent = "标记超过 28% 容易把整图抹糊，请缩小红色区域后重试";
         btnProcess.disabled = false;
         return;
       }

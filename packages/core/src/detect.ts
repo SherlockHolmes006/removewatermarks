@@ -2,12 +2,14 @@ import type { AutoDetectOptions, MaskBuffer, RawImage } from "./types.js";
 import { closeMask, createEmptyMask, dilateMask, fillMaskHoles } from "./image-utils.js";
 
 /**
- * Detect semi-transparent watermarks via residual vs. local blur.
- * Then close + fill holes so letter interiors are solid (not hollow outlines).
- * Opaque content text edges are rejected so titles don't get falsely outlined.
+ * Detect tiled / semi-transparent watermarks.
+ *
+ * Important: use per-tile thresholds (not global top-K), otherwise some regions
+ * steal the budget and other identical watermarks are missed.
+ * Then morphologically thicken strokes so letter interiors are filled.
  */
 export function detectWatermarkMask(image: RawImage, options: AutoDetectOptions = {}): MaskBuffer {
-  const sensitivity = clamp01(options.sensitivity ?? 0.5);
+  const sensitivity = clamp01(options.sensitivity ?? 0.55);
   const edgeOnly = options.edgeOnly ?? false;
   const edgeRatio = options.edgeRatio ?? 0.4;
 
@@ -27,89 +29,152 @@ export function detectWatermarkMask(image: RawImage, options: AutoDetectOptions 
     lum[i] = 0.299 * rCh[i] + 0.587 * gCh[i] + 0.114 * bCh[i];
   }
 
-  const blurRadius = Math.max(6, Math.round(Math.min(width, height) * 0.01));
-  const blurLum = boxBlur(lum, width, height, blurRadius);
-  const blurR = boxBlur(rCh, width, height, blurRadius);
-  const blurG = boxBlur(gCh, width, height, blurRadius);
-  const blurB = boxBlur(bCh, width, height, blurRadius);
+  // Two blur scales: catch both thin strokes and softer washes.
+  const r1 = Math.max(5, Math.round(Math.min(width, height) * 0.008));
+  const r2 = Math.max(r1 + 4, Math.round(Math.min(width, height) * 0.02));
+
+  const blurLum1 = boxBlur(lum, width, height, r1);
+  const blurLum2 = boxBlur(lum, width, height, r2);
+  const blurR1 = boxBlur(rCh, width, height, r1);
+  const blurG1 = boxBlur(gCh, width, height, r1);
+  const blurB1 = boxBlur(bCh, width, height, r1);
 
   const residual = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const dR = rCh[i] - blurR[i];
-    const dG = gCh[i] - blurG[i];
-    const dB = bCh[i] - blurB[i];
-    residual[i] = Math.sqrt(dR * dR + dG * dG + dB * dB);
-  }
-
-  const zone = buildScanZone(width, height, edgeOnly, edgeRatio);
   const scores = new Float32Array(n);
+  const zone = buildScanZone(width, height, edgeOnly, edgeRatio);
 
-  // Soft overlays sit in a mild residual band; opaque glyph interiors are much stronger.
-  const resLo = 0.012 - sensitivity * 0.005;
-  const resHi = 0.11 + sensitivity * 0.04;
-  const opaqueCut = resHi + 0.04;
-  const maxCoverage = 0.03 + sensitivity * 0.07; // ~3% … 10% before morphological fill
+  const resLo = 0.008 - sensitivity * 0.004;
+  const resHi = 0.13 + sensitivity * 0.05;
+  const opaqueCut = 0.2 + sensitivity * 0.05;
 
   for (let i = 0; i < n; i++) {
     if (!zone[i]) continue;
 
-    const res = residual[i];
+    const dR = rCh[i] - blurR1[i];
+    const dG = gCh[i] - blurG1[i];
+    const dB = bCh[i] - blurB1[i];
+    const res = Math.sqrt(dR * dR + dG * dG + dB * dB);
+    residual[i] = res;
+
+    const dL1 = lum[i] - blurLum1[i];
+    const dL2 = lum[i] - blurLum2[i];
+    // Mild lift vs either scale (tiled white/pink watermarks).
+    const lift = Math.max(dL1, dL2);
+
     if (res < resLo || res > resHi) continue;
+    // Opaque title interiors / hard graphics — skip.
+    if (res >= opaqueCut) continue;
+    // Only reject if tightly hugging a strong opaque blob.
+    if (touchesOpaqueInterior(residual, width, height, i, opaqueCut, 1)) continue;
 
-    const dL = lum[i] - blurLum[i];
-    const dR = rCh[i] - blurR[i];
-    const dG = gCh[i] - blurG[i];
-    const dB = bCh[i] - blurB[i];
+    const paleLift = lift > 0.004 && lift < 0.18;
+    const nearNeutral = Math.abs(dR - dG) < 0.08 && Math.abs(dG - dB) < 0.08;
+    const pinkish = dR > dG + 0.002 && dR > dB + 0.002 && lift > 0.002;
+    const coolTint = dB > dR + 0.002 && lift > 0.002;
 
-    // Skip anti-aliased edges of opaque content (hollow rings around real titles).
-    if (touchesOpaqueInterior(residual, width, height, i, opaqueCut)) continue;
+    if (!(paleLift || (nearNeutral && lift > 0.003) || pinkish || coolTint)) continue;
 
-    const paleLift = dL > 0.006 && dL < 0.16;
-    const tinted = Math.abs(dR - dG) < 0.07 && Math.abs(dG - dB) < 0.07;
-    const pinkish = dR > dG + 0.003 && dR > dB + 0.003 && dL > 0;
-    const blueish = dB > dR + 0.003 && dB > dG + 0.001;
-
-    if (!(paleLift || tinted || pinkish || blueish)) continue;
-
-    const localBlurVar = sampleVar(blurLum, width, height, i % width, (i / width) | 0, 3);
-    if (localBlurVar > 0.014 + sensitivity * 0.01) continue;
-
-    // Prefer softer residual (stroke body) over sharper mid-edge rings.
-    let score = (resHi - res) + 0.02;
+    // Soft body scores higher than sharp residual spikes.
+    let score = 0.04 + (resHi - res) * 0.8 + Math.min(0.08, lift) * 1.5;
     if (paleLift) score += 0.03;
-    if (pinkish || blueish) score += 0.025;
-    if (tinted) score += 0.01;
+    if (pinkish) score += 0.02;
+    if (nearNeutral) score += 0.01;
     scores[i] = score;
   }
 
-  let mask = thresholdByCoverage(scores, width, height, maxCoverage);
-  mask = pruneNoise(mask, width, height, sensitivity, residual, opaqueCut);
+  // Per-tile selection → every region of a repeating watermark can win.
+  const tile = Math.max(64, Math.round(Math.min(width, height) / 6));
+  let mask = thresholdByTiles(scores, width, height, tile, sensitivity);
 
-  // Fill stroke interiors: close gaps, then fill enclosed holes, slight dilate for coverage.
-  const closeRadius = sensitivity > 0.65 ? 3 : 2;
-  mask = closeMask(mask, width, height, closeRadius);
+  // Also keep a global soft floor so weak-but-valid strokes aren't lost between tiles.
+  const floor = scorePercentile(scores, 0.35 - sensitivity * 0.15);
+  if (floor > 0) {
+    for (let i = 0; i < n; i++) {
+      if (scores[i] >= floor) mask[i] = 255;
+    }
+  }
+
+  mask = pruneSpeckles(mask, width, height, Math.max(4, Math.floor(10 - sensitivity * 6)));
+
+  // Thicken & fill so characters are solid blocks, not hollow rings.
+  const closeR = sensitivity > 0.7 ? 4 : sensitivity > 0.4 ? 3 : 2;
+  mask = closeMask(mask, width, height, closeR);
+  mask = dilateMask(mask, width, height, 2); // expand into stroke interiors
   mask = fillMaskHoles(mask, width, height);
-  // After fill, drop components that landed on opaque content (solid titles).
   mask = pruneOpaqueFilled(mask, width, height, residual, opaqueCut);
-  mask = pruneHollowOutlines(mask, width, height, residual, opaqueCut);
+  // Slight tighten after expand, then one more dilate for coverage.
+  mask = closeMask(mask, width, height, 1);
   mask = dilateMask(mask, width, height, 1);
 
-  // Safety: don't let filled mask explode past ~12%.
-  return clampCoverage(mask, width, height, 0.04 + sensitivity * 0.08);
+  // Tiled watermarks can legitimately cover more area; still guard against whole-image blur.
+  return clampCoverage(mask, width, height, 0.08 + sensitivity * 0.12);
 }
 
-/** True if a neighbor looks like opaque content interior (strong residual). */
+/**
+ * In each tile, keep pixels above a local score cutoff so detection is spatially even.
+ */
+function thresholdByTiles(
+  scores: Float32Array,
+  width: number,
+  height: number,
+  tileSize: number,
+  sensitivity: number
+): MaskBuffer {
+  const mask = createEmptyMask(width, height);
+  // Lower percentile cutoff → keep more pixels in each tile.
+  const keepFrom = clamp01(0.4 - sensitivity * 0.25); // 0.4 … 0.15
+
+  for (let ty = 0; ty < height; ty += tileSize) {
+    for (let tx = 0; tx < width; tx += tileSize) {
+      const x1 = Math.min(width, tx + tileSize);
+      const y1 = Math.min(height, ty + tileSize);
+      const local: number[] = [];
+
+      for (let y = ty; y < y1; y++) {
+        for (let x = tx; x < x1; x++) {
+          const s = scores[y * width + x];
+          if (s > 0) local.push(s);
+        }
+      }
+      if (local.length < 8) continue;
+
+      local.sort((a, b) => a - b);
+      const idx = Math.min(local.length - 1, Math.floor(local.length * keepFrom));
+      const cutoff = local[idx];
+
+      for (let y = ty; y < y1; y++) {
+        for (let x = tx; x < x1; x++) {
+          const i = y * width + x;
+          if (scores[i] >= cutoff) mask[i] = 255;
+        }
+      }
+    }
+  }
+
+  return mask;
+}
+
+function scorePercentile(scores: Float32Array, p: number): number {
+  const vals: number[] = [];
+  for (let i = 0; i < scores.length; i++) if (scores[i] > 0) vals.push(scores[i]);
+  if (vals.length < 16) return 0;
+  vals.sort((a, b) => a - b);
+  const idx = Math.min(vals.length - 1, Math.max(0, Math.floor(vals.length * clamp01(p))));
+  return vals[idx];
+}
+
 function touchesOpaqueInterior(
   residual: Float32Array,
   width: number,
   height: number,
   idx: number,
-  opaqueCut: number
+  opaqueCut: number,
+  radius: number
 ): boolean {
   const x = idx % width;
   const y = (idx / width) | 0;
-  for (let dy = -2; dy <= 2; dy++) {
-    for (let dx = -2; dx <= 2; dx++) {
+  for (let dy = -radius; dy <= radius; dy++) {
+    for (let dx = -radius; dx <= radius; dx++) {
       if (dx === 0 && dy === 0) continue;
       const nx = x + dx;
       const ny = y + dy;
@@ -120,43 +185,23 @@ function touchesOpaqueInterior(
   return false;
 }
 
-/**
- * Drop components that are mostly hollow rings around opaque glyphs
- * (area fills little of bbox, and bbox interior has strong residual).
- */
-function pruneHollowOutlines(
-  mask: MaskBuffer,
-  width: number,
-  height: number,
-  residual: Float32Array,
-  opaqueCut: number
-): MaskBuffer {
+function pruneSpeckles(mask: MaskBuffer, width: number, height: number, minArea: number): MaskBuffer {
   const visited = new Uint8Array(mask.length);
   const out = createEmptyMask(width, height);
   const stack: number[] = [];
 
   for (let i = 0; i < mask.length; i++) {
     if (mask[i] === 0 || visited[i]) continue;
-
     stack.length = 0;
     stack.push(i);
     visited[i] = 1;
     const component: number[] = [];
-    let minX = width;
-    let minY = height;
-    let maxX = 0;
-    let maxY = 0;
 
     while (stack.length) {
       const cur = stack.pop()!;
       component.push(cur);
       const x = cur % width;
       const y = (cur / width) | 0;
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
-
       for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) {
           if (dx === 0 && dy === 0) continue;
@@ -171,33 +216,13 @@ function pruneHollowOutlines(
       }
     }
 
-    const bw = maxX - minX + 1;
-    const bh = maxY - minY + 1;
-    const bboxArea = bw * bh;
-    const fillRatio = component.length / Math.max(1, bboxArea);
-
-    let opaqueHits = 0;
-    let samples = 0;
-    const step = Math.max(1, Math.floor(Math.min(bw, bh) / 8));
-    for (let y = minY; y <= maxY; y += step) {
-      for (let x = minX; x <= maxX; x += step) {
-        samples++;
-        if (residual[y * width + x] >= opaqueCut) opaqueHits++;
-      }
+    if (component.length >= minArea) {
+      for (const idx of component) out[idx] = 255;
     }
-    const opaqueRatio = samples === 0 ? 0 : opaqueHits / samples;
-
-    if (fillRatio < 0.35 && opaqueRatio > 0.2 && bw > 12 && bh > 12) {
-      continue;
-    }
-
-    for (const idx of component) out[idx] = 255;
   }
-
   return out;
 }
 
-/** After hole-fill, drop blobs that sit on opaque title/content pixels. */
 function pruneOpaqueFilled(
   mask: MaskBuffer,
   width: number,
@@ -208,7 +233,7 @@ function pruneOpaqueFilled(
   const visited = new Uint8Array(mask.length);
   const out = createEmptyMask(width, height);
   const stack: number[] = [];
-  const softCut = opaqueCut * 0.75;
+  const softCut = opaqueCut * 0.85;
 
   for (let i = 0; i < mask.length; i++) {
     if (mask[i] === 0 || visited[i]) continue;
@@ -240,29 +265,22 @@ function pruneOpaqueFilled(
       }
     }
 
-    // Watermark fills stay mild; opaque glyph fills light up residual.
-    if (strong / component.length > 0.28) continue;
-
+    // Drop blobs that mostly sit on opaque content (solid titles / icons).
+    if (strong / component.length > 0.32) continue;
     for (const idx of component) out[idx] = 255;
   }
 
   return out;
 }
 
-function clampCoverage(
-  mask: MaskBuffer,
-  width: number,
-  height: number,
-  maxCoverage: number
-): MaskBuffer {
+function clampCoverage(mask: MaskBuffer, width: number, height: number, maxCoverage: number): MaskBuffer {
   const n = width * height;
   let count = 0;
   for (let i = 0; i < n; i++) if (mask[i]) count++;
   if (count <= n * maxCoverage) return mask;
 
-  // Thin from the outside via erosion rounds until under budget.
   let cur = mask;
-  for (let round = 0; round < 4; round++) {
+  for (let round = 0; round < 5; round++) {
     cur = erodeOnce(cur, width, height);
     count = 0;
     for (let i = 0; i < n; i++) if (cur[i]) count++;
@@ -276,40 +294,12 @@ function erodeOnce(mask: MaskBuffer, width: number, height: number): MaskBuffer 
   for (let y = 1; y < height - 1; y++) {
     for (let x = 1; x < width - 1; x++) {
       const i = y * width + x;
-      if (
-        mask[i] &&
-        mask[i - 1] &&
-        mask[i + 1] &&
-        mask[i - width] &&
-        mask[i + width]
-      ) {
+      if (mask[i] && mask[i - 1] && mask[i + 1] && mask[i - width] && mask[i + width]) {
         out[i] = 255;
       }
     }
   }
   return out;
-}
-
-function thresholdByCoverage(
-  scores: Float32Array,
-  width: number,
-  height: number,
-  maxCoverage: number
-): MaskBuffer {
-  const n = width * height;
-  const indexed: { i: number; s: number }[] = [];
-  for (let i = 0; i < n; i++) {
-    if (scores[i] > 0) indexed.push({ i, s: scores[i] });
-  }
-
-  const mask = createEmptyMask(width, height);
-  if (indexed.length === 0) return mask;
-
-  indexed.sort((a, b) => b.s - a.s);
-  const budget = Math.max(32, Math.floor(n * maxCoverage));
-  const keep = Math.min(budget, indexed.length);
-  for (let k = 0; k < keep; k++) mask[indexed[k].i] = 255;
-  return mask;
 }
 
 function boxBlur(src: Float32Array, width: number, height: number, radius: number): Float32Array {
@@ -341,33 +331,6 @@ function boxBlur(src: Float32Array, width: number, height: number, radius: numbe
   return out;
 }
 
-function sampleVar(
-  field: Float32Array,
-  width: number,
-  height: number,
-  cx: number,
-  cy: number,
-  radius: number
-): number {
-  let sum = 0;
-  let sumSq = 0;
-  let count = 0;
-  for (let dy = -radius; dy <= radius; dy++) {
-    for (let dx = -radius; dx <= radius; dx++) {
-      const x = cx + dx;
-      const y = cy + dy;
-      if (x < 0 || y < 0 || x >= width || y >= height) continue;
-      const v = field[y * width + x];
-      sum += v;
-      sumSq += v * v;
-      count++;
-    }
-  }
-  if (count === 0) return 0;
-  const mean = sum / count;
-  return sumSq / count - mean * mean;
-}
-
 function buildScanZone(width: number, height: number, edgeOnly: boolean, edgeRatio: number): Uint8Array {
   const zone = new Uint8Array(width * height);
   if (!edgeOnly) {
@@ -377,7 +340,6 @@ function buildScanZone(width: number, height: number, edgeOnly: boolean, edgeRat
 
   const band = Math.max(24, Math.floor(Math.min(width, height) * edgeRatio));
   const bottomBand = Math.max(band, Math.floor(height * 0.3));
-
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       if (x < band || y < band || x >= width - band || y >= height - band || y >= height - bottomBand) {
@@ -386,61 +348,6 @@ function buildScanZone(width: number, height: number, edgeOnly: boolean, edgeRat
     }
   }
   return zone;
-}
-
-function pruneNoise(
-  mask: MaskBuffer,
-  width: number,
-  height: number,
-  sensitivity: number,
-  residual: Float32Array,
-  opaqueCut: number
-): MaskBuffer {
-  const minArea = Math.max(6, Math.floor((1.05 - sensitivity) * 22));
-  const maxArea = Math.floor(width * height * 0.15);
-  const visited = new Uint8Array(mask.length);
-  const out = createEmptyMask(width, height);
-  const stack: number[] = [];
-
-  for (let i = 0; i < mask.length; i++) {
-    if (mask[i] === 0 || visited[i]) continue;
-
-    stack.length = 0;
-    stack.push(i);
-    visited[i] = 1;
-    const component: number[] = [];
-    let opaqueTouch = 0;
-
-    while (stack.length) {
-      const cur = stack.pop()!;
-      component.push(cur);
-      if (touchesOpaqueInterior(residual, width, height, cur, opaqueCut)) opaqueTouch++;
-
-      const x = cur % width;
-      const y = (cur / width) | 0;
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          if (dx === 0 && dy === 0) continue;
-          const nx = x + dx;
-          const ny = y + dy;
-          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
-          const ni = ny * width + nx;
-          if (visited[ni] || mask[ni] === 0) continue;
-          visited[ni] = 1;
-          stack.push(ni);
-        }
-      }
-    }
-
-    // Components that mostly hug opaque glyphs are title outlines — drop them.
-    if (opaqueTouch / component.length > 0.45) continue;
-
-    if (component.length >= minArea && component.length <= maxArea) {
-      for (const idx of component) out[idx] = 255;
-    }
-  }
-
-  return out;
 }
 
 function clamp(v: number, lo: number, hi: number): number {
