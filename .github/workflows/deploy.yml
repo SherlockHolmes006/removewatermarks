@@ -1,10 +1,9 @@
-# Push 到 main 后：GitHub 上 build，再 rsync 同步到宝塔网站目录
+# Push 到 main 后：GitHub 上 build，再打包上传到宝塔网站目录
 #
-# Secrets：
-#   SSH_HOST / SSH_USER / SSH_PRIVATE_KEY / WEB_ROOT  （必填）
-#   SSH_PORT  （可选，默认 22）
+# Secrets（必填）：SSH_HOST / SSH_USER / SSH_PRIVATE_KEY / WEB_ROOT
+# 可选：SSH_PORT（默认 22）
 #
-# 宝塔注意：不会删除 .user.ini / .htaccess，避免 Operation not permitted
+# 不用服务器上的 rsync；用 tar+scp，并保留宝塔的 .user.ini
 
 name: Deploy Web
 
@@ -33,7 +32,7 @@ jobs:
           test -f apps/web/dist/index.html
           ls -la apps/web/dist
 
-      - name: Deploy to Baota via rsync
+      - name: Deploy to Baota via tar+scp
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
@@ -41,21 +40,41 @@ jobs:
           SSH_PORT: ${{ secrets.SSH_PORT || 22 }}
           WEB_ROOT: ${{ secrets.WEB_ROOT }}
         run: |
-          set -e
-          if [ -z "$SSH_HOST" ] || [ -z "$SSH_USER" ] || [ -z "$SSH_PRIVATE_KEY" ] || [ -z "$WEB_ROOT" ]; then
-            echo "缺少 Secrets：请确认已配置 SSH_HOST / SSH_USER / SSH_PRIVATE_KEY / WEB_ROOT"
+          set -euo pipefail
+
+          if [ -z "${SSH_HOST}" ] || [ -z "${SSH_USER}" ] || [ -z "${SSH_PRIVATE_KEY}" ] || [ -z "${WEB_ROOT}" ]; then
+            echo "缺少 Secrets：请确认 SSH_HOST / SSH_USER / SSH_PRIVATE_KEY / WEB_ROOT 都已配置"
             exit 1
           fi
 
           mkdir -p ~/.ssh
+          # 兼容私钥末尾没有换行的情况
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
-          rsync -avz --delete \
-            --exclude '.user.ini' \
-            --exclude '.htaccess' \
-            -e "ssh -i ~/.ssh/deploy_key -p $SSH_PORT -o StrictHostKeyChecking=accept-new" \
-            apps/web/dist/ \
-            "${SSH_USER}@${SSH_HOST}:${WEB_ROOT}/"
+          SSH_OPTS="-i ~/.ssh/deploy_key -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes"
 
-          echo "Deploy done -> ${SSH_USER}@${SSH_HOST}:${WEB_ROOT}/"
+          echo "==> 测试 SSH 连接"
+          ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "echo ok && pwd && ls -ld '${WEB_ROOT}'"
+
+          echo "==> 打包 dist"
+          tar -C apps/web/dist -czf /tmp/web-dist.tar.gz .
+
+          echo "==> 上传并解压到网站目录（保留 .user.ini）"
+          scp $SSH_OPTS /tmp/web-dist.tar.gz "${SSH_USER}@${SSH_HOST}:/tmp/web-dist.tar.gz"
+
+          ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" bash -s <<EOF
+          set -euo pipefail
+          WEB_ROOT='${WEB_ROOT}'
+          mkdir -p "\$WEB_ROOT"
+          # 只清站点内容，不动宝塔保护文件
+          find "\$WEB_ROOT" -mindepth 1 \
+            ! -name '.user.ini' \
+            ! -name '.htaccess' \
+            -exec rm -rf {} +
+          tar -xzf /tmp/web-dist.tar.gz -C "\$WEB_ROOT"
+          rm -f /tmp/web-dist.tar.gz
+          ls -la "\$WEB_ROOT"
+          test -f "\$WEB_ROOT/index.html"
+          echo "Deploy success"
+          EOF
