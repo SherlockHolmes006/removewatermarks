@@ -2,8 +2,6 @@
 #
 # Secrets（必填）：SSH_HOST / SSH_USER / SSH_PRIVATE_KEY / WEB_ROOT
 # 可选：SSH_PORT（默认 22）
-#
-# 不用服务器上的 rsync；用 tar+scp，并保留宝塔的 .user.ini
 
 name: Deploy Web
 
@@ -48,33 +46,36 @@ jobs:
           fi
 
           mkdir -p ~/.ssh
-          # 兼容私钥末尾没有换行的情况
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          # 去掉 Windows 粘贴私钥可能带的 \r，避免 invalid format
+          printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
-          SSH_OPTS="-i ~/.ssh/deploy_key -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes"
+          echo "==> 私钥指纹（用于确认密钥是否加载成功）"
+          ssh-keygen -lf ~/.ssh/deploy_key || {
+            echo "SSH_PRIVATE_KEY 格式不对。请重新复制本机 deploy_removewatermarks 私钥全文到 Secret"
+            exit 1
+          }
 
-          echo "==> 测试 SSH 连接"
-          ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "echo ok && pwd && ls -ld '${WEB_ROOT}'"
+          echo "==> 测试 SSH"
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" \
+            -o StrictHostKeyChecking=accept-new \
+            -o IdentitiesOnly=yes \
+            "${SSH_USER}@${SSH_HOST}" \
+            "echo SSH_OK && ls -ld '${WEB_ROOT}'"
 
           echo "==> 打包 dist"
           tar -C apps/web/dist -czf /tmp/web-dist.tar.gz .
 
-          echo "==> 上传并解压到网站目录（保留 .user.ini）"
-          scp $SSH_OPTS /tmp/web-dist.tar.gz "${SSH_USER}@${SSH_HOST}:/tmp/web-dist.tar.gz"
+          echo "==> 上传压缩包"
+          scp -i ~/.ssh/deploy_key -P "$SSH_PORT" \
+            -o StrictHostKeyChecking=accept-new \
+            -o IdentitiesOnly=yes \
+            /tmp/web-dist.tar.gz \
+            "${SSH_USER}@${SSH_HOST}:/tmp/web-dist.tar.gz"
 
-          ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" bash -s <<EOF
-          set -euo pipefail
-          WEB_ROOT='${WEB_ROOT}'
-          mkdir -p "\$WEB_ROOT"
-          # 只清站点内容，不动宝塔保护文件
-          find "\$WEB_ROOT" -mindepth 1 \
-            ! -name '.user.ini' \
-            ! -name '.htaccess' \
-            -exec rm -rf {} +
-          tar -xzf /tmp/web-dist.tar.gz -C "\$WEB_ROOT"
-          rm -f /tmp/web-dist.tar.gz
-          ls -la "\$WEB_ROOT"
-          test -f "\$WEB_ROOT/index.html"
-          echo "Deploy success"
-          EOF
+          echo "==> 解压覆盖网站目录（保留 .user.ini）"
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" \
+            -o StrictHostKeyChecking=accept-new \
+            -o IdentitiesOnly=yes \
+            "${SSH_USER}@${SSH_HOST}" \
+            "mkdir -p '${WEB_ROOT}' && tar -xzf /tmp/web-dist.tar.gz -C '${WEB_ROOT}' && rm -f /tmp/web-dist.tar.gz && ls -la '${WEB_ROOT}' && test -f '${WEB_ROOT}/index.html' && echo DEPLOY_OK"
