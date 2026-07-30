@@ -69,7 +69,7 @@ function loadImageToCanvas(file: File) {
     lastPoint = null;
 
     enableControls(true);
-    hint.textContent = "可「自动检测」或切换到「画笔标记」手动涂选水印区域";
+    hint.textContent = "建议优先「手动画笔标记」涂选水印；文字多且复杂时不建议依赖自动检测";
     setStatus("");
     URL.revokeObjectURL(img.src);
   };
@@ -208,12 +208,12 @@ btnAuto.addEventListener("click", () => {
       clearResult();
 
       if (count > 0) {
-        hint.textContent = `已标记约 ${count.toLocaleString()} 像素（占比 ${(coverage * 100).toFixed(1)}%）。请用画笔/橡皮微调后，再点「开始去水印」`;
+        hint.textContent = `已标记约 ${count.toLocaleString()} 像素（占比 ${(coverage * 100).toFixed(1)}%）。复杂文字水印请用手动画笔/橡皮擦微调后再处理`;
         setStatus(`自动检测完成：已标记 ${(coverage * 100).toFixed(1)}% 区域（未处理）`, "ok");
       } else {
         hint.textContent =
-          "未检测到明显水印。请调高「检测灵敏度」后重试，或用手动画笔涂选水印";
-        setStatus("自动检测未找到水印，请手动画笔标记", "err");
+          "未检测到明显水印。请调高「检测灵敏度」后重试，或优先用手动画笔标记";
+        setStatus("自动检测未找到水印，请改用手动画笔标记", "err");
       }
     } catch (err) {
       setStatus(`检测失败: ${err instanceof Error ? err.message : String(err)}`, "err");
@@ -272,8 +272,8 @@ btnProcess.addEventListener("click", () => {
     try {
       const hasUserMask = !!(userMask && userMask.some((v) => v > 0));
       if (!hasUserMask) {
-        setStatus("请先「自动检测」或用画笔标记水印区域", "err");
-        hint.textContent = "未标记水印区域，已取消处理，以免误伤整张图";
+        setStatus("请先用手动画笔标记水印区域（或使用靠后的自动检测）", "err");
+        hint.textContent = "未标记水印区域，已取消处理。文字水印较多时建议手动画笔";
         btnProcess.disabled = false;
         return;
       }
@@ -333,6 +333,6 @@ btnReset.addEventListener("click", () => {
   clearMaskOverlay();
   clearResult();
   enableControls(true);
-  hint.textContent = "已重置此图的标记与结果，可继续自动检测或画笔标记";
+  hint.textContent = "已重置此图的标记与结果，可继续手动画笔标记";
   setStatus("已重置当前图片的标记", "ok");
 });

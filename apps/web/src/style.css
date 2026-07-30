@@ -98,6 +98,26 @@ body {
   background: transparent;
 }
 
+.btn-secondary {
+  background: #2a2f3d;
+  border-color: #3d4558;
+  color: #c5cad6;
+  font-size: 0.8rem;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: #343b4d;
+  border-color: #4a5368;
+}
+
+.toolbar-sep {
+  display: inline-block;
+  width: 1px;
+  height: 28px;
+  background: var(--border);
+  margin: 0 4px;
+}
+
 .btn.active {
   outline: 2px solid var(--primary);
   outline-offset: 1px;

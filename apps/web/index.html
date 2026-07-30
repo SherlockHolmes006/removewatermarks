@@ -18,20 +18,28 @@
           选择图片
           <input type="file" id="fileInput" accept="image/*" hidden />
         </label>
-        <button id="btnAuto" class="btn" disabled>自动检测水印</button>
-        <button id="btnBrush" class="btn" disabled>画笔标记</button>
-        <button id="btnEraser" class="btn" disabled>橡皮擦</button>
+        <button id="btnBrush" class="btn" disabled>手动画笔标记</button>
+        <button id="btnEraser" class="btn" disabled>手动橡皮擦</button>
         <label class="control">
           笔刷
           <input type="range" id="brushSize" min="4" max="48" value="16" />
         </label>
+        <button id="btnProcess" class="btn btn-accent" disabled>开始去水印</button>
+        <button id="btnDownload" class="btn" disabled>下载结果</button>
+        <button id="btnReset" class="btn btn-ghost" disabled>重置此图</button>
+        <span class="toolbar-sep" aria-hidden="true"></span>
         <label class="control">
           检测灵敏度
           <input type="range" id="sensitivity" min="0" max="100" value="50" />
         </label>
-        <button id="btnProcess" class="btn btn-accent" disabled>开始去水印</button>
-        <button id="btnDownload" class="btn" disabled>下载结果</button>
-        <button id="btnReset" class="btn btn-ghost" disabled>重置此图</button>
+        <button
+          id="btnAuto"
+          class="btn btn-secondary"
+          disabled
+          title="文字水印较多且复杂时，自动检测容易漏标或不准，建议优先使用手动画笔标记"
+        >
+          自动检测水印（文字多且复杂不建议）
+        </button>
       </section>
 
       <section class="canvas-area">
@@ -43,7 +51,7 @@
               <canvas id="canvasMask" class="mask-layer"></canvas>
             </div>
           </div>
-          <p class="hint" id="hint">上传图片后，可自动检测或手动画笔标记水印区域</p>
+          <p class="hint" id="hint">上传图片后，建议先用手动画笔标记水印区域（文字水印多且复杂时，自动检测效果有限）</p>
         </div>
         <div class="panel">
           <h2>处理结果</h2>
