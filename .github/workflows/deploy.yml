@@ -1,7 +1,13 @@
 # Push 到 main 后：GitHub 上 build，再打包上传到宝塔网站目录
 #
-# Secrets（必填）：SSH_HOST / SSH_USER / SSH_PRIVATE_KEY / WEB_ROOT
+# Secrets（必填）：
+#   SSH_HOST / SSH_USER / WEB_ROOT
+#   SSH_PRIVATE_KEY  —— 推荐填「一行 Base64」（见下方），也兼容原始私钥文本
 # 可选：SSH_PORT（默认 22）
+#
+# 生成 Base64（Windows PowerShell，会复制到剪贴板）：
+#   $p="$env:USERPROFILE\.ssh\deploy_removewatermarks"
+#   Set-Clipboard ([Convert]::ToBase64String([IO.File]::ReadAllBytes($p)))
 
 name: Deploy Web
 
@@ -46,32 +52,40 @@ jobs:
           fi
 
           mkdir -p ~/.ssh
-          # 去掉 \r；并打印首尾行便于排查（不打印中间密钥内容）
-          printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
+          KEY_RAW=$(printf '%s' "$SSH_PRIVATE_KEY" | tr -d '\r')
 
-          echo "==> 密钥文件检查"
-          echo "行数: $(wc -l < ~/.ssh/deploy_key)"
+          # 支持两种格式：
+          # 1) 原始私钥（含 BEGIN PRIVATE KEY）
+          # 2) 一行 Base64（推荐，避免粘贴换行丢失）
+          if printf '%s' "$KEY_RAW" | grep -q "BEGIN .*PRIVATE KEY"; then
+            echo "==> 检测到原始私钥文本"
+            printf '%s\n' "$KEY_RAW" > ~/.ssh/deploy_key
+          else
+            echo "==> 按 Base64 解码私钥"
+            if ! printf '%s' "$KEY_RAW" | base64 -d > ~/.ssh/deploy_key 2>/tmp/b64err.txt; then
+              echo "Base64 解码失败："
+              cat /tmp/b64err.txt || true
+              echo "请重新生成并粘贴一整行 Base64 到 SSH_PRIVATE_KEY"
+              exit 1
+            fi
+          fi
+
+          chmod 600 ~/.ssh/deploy_key
           echo "首行: $(head -n 1 ~/.ssh/deploy_key)"
           echo "末行: $(tail -n 1 ~/.ssh/deploy_key)"
 
           if ! grep -q "BEGIN .*PRIVATE KEY" ~/.ssh/deploy_key; then
-            echo "错误：Secret 里不是私钥。"
-            echo "正确首行应类似：-----BEGIN OPENSSH PRIVATE KEY-----"
-            echo "如果你贴的是 ssh-ed25519 AAAA... 那是公钥，不能用。"
+            echo "错误：解码后仍不是私钥。请确认 Secret 用的是私钥 Base64，不是 .pub"
             exit 1
           fi
 
           if ! ssh-keygen -y -f ~/.ssh/deploy_key >/tmp/derived.pub 2>/tmp/keyerr.txt; then
             echo "错误：私钥无法解析："
             cat /tmp/keyerr.txt
-            echo "请用记事本打开本机 deploy_removewatermarks，全选复制后更新 GitHub Secret。"
             exit 1
           fi
-
-          echo "==> 私钥可用，对应公钥为："
+          echo "==> 私钥可用，对应公钥："
           cat /tmp/derived.pub
-          ssh-keygen -lf /tmp/derived.pub || true
 
           echo "==> 测试 SSH"
           ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" \
@@ -90,7 +104,7 @@ jobs:
             /tmp/web-dist.tar.gz \
             "${SSH_USER}@${SSH_HOST}:/tmp/web-dist.tar.gz"
 
-          echo "==> 解压覆盖网站目录（保留 .user.ini）"
+          echo "==> 解压覆盖网站目录"
           ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" \
             -o StrictHostKeyChecking=accept-new \
             -o IdentitiesOnly=yes \
