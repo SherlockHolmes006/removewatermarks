@@ -196,9 +196,107 @@ body {
   gap: 16px;
 }
 
+.auto-label-short {
+  display: none;
+}
+
 @media (max-width: 860px) {
   .canvas-area {
     grid-template-columns: 1fr;
+  }
+}
+
+/* Mobile: stack controls, larger tap targets, single-column images */
+@media (max-width: 720px) {
+  .app {
+    padding: 14px 12px 28px;
+  }
+
+  .header h1 {
+    font-size: 1.35rem;
+  }
+
+  .subtitle {
+    font-size: 0.85rem;
+    line-height: 1.4;
+  }
+
+  .toolbar {
+    gap: 8px;
+    padding: 12px;
+    margin: 16px 0;
+  }
+
+  .toolbar-sep {
+    display: none;
+  }
+
+  .toolbar > .btn,
+  .toolbar > label.btn {
+    flex: 1 1 calc(50% - 8px);
+    min-height: 44px;
+    padding: 10px 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .toolbar > label.btn-primary,
+  .toolbar > #btnProcess,
+  .toolbar > #btnDownload,
+  .toolbar > #btnReset,
+  .toolbar > #btnAuto {
+    flex: 1 1 100%;
+  }
+
+  .auto-label-full {
+    display: none;
+  }
+
+  .auto-label-short {
+    display: inline;
+  }
+
+  .control {
+    flex: 1 1 100%;
+    justify-content: space-between;
+    min-height: 40px;
+  }
+
+  .control input[type="range"] {
+    flex: 1;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+    height: 28px;
+  }
+
+  .control input[type="range"]::-webkit-slider-thumb {
+    width: 18px;
+    height: 18px;
+    margin-top: -6.5px;
+  }
+
+  .control input[type="range"]::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+  }
+
+  .panel {
+    padding: 12px;
+  }
+
+  .canvas-wrap {
+    max-height: 58vh;
+    min-height: 180px;
+  }
+
+  .hint,
+  .status {
+    font-size: 0.8rem;
+    line-height: 1.45;
   }
 }
 
@@ -276,19 +374,6 @@ canvas {
 
 .status.err {
   color: var(--danger);
-}
-
-.footer {
-  margin-top: 28px;
-  text-align: center;
-  font-size: 0.8rem;
-  color: var(--muted);
-}
-
-.footer code {
-  background: #252936;
-  padding: 2px 6px;
-  border-radius: 4px;
 }
 
 .empty-placeholder {
