@@ -1,13 +1,10 @@
-# Push 到 main 后自动构建，并通过 SSH 同步到云服务器
+# Push 到 main 后：GitHub 上 build，再 rsync 同步到宝塔网站目录
 #
-# 首次使用前，在 GitHub 仓库 Settings → Secrets and variables → Actions 添加：
-#   SSH_HOST          服务器公网 IP 或域名
-#   SSH_USER          SSH 登录用户名（如 root / ubuntu）
-#   SSH_PRIVATE_KEY   用于部署的私钥全文（建议单独部署密钥）
-#   SSH_PORT          可选，默认 22
-#   WEB_ROOT          可选，Nginx 站点目录，默认 /var/www/remove-watermark
+# Secrets：
+#   SSH_HOST / SSH_USER / SSH_PRIVATE_KEY / WEB_ROOT  （必填）
+#   SSH_PORT  （可选，默认 22）
 #
-# 服务器需已安装：git、Node.js >= 18、rsync、nginx
+# 宝塔注意：不会删除 .user.ini / .htaccess，避免 Operation not permitted
 
 name: Deploy Web
 
@@ -26,23 +23,39 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
 
       - name: Install & build
         run: |
           npm ci
           npm run build
+          test -f apps/web/dist/index.html
+          ls -la apps/web/dist
 
-      - name: Upload dist to server
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT || 22 }}
-          source: "apps/web/dist/*"
-          target: ${{ secrets.WEB_ROOT || '/var/www/remove-watermark' }}
-          strip_components: 3
-          overwrite: true
-          rm: true
+      - name: Deploy to Baota via rsync
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_PORT: ${{ secrets.SSH_PORT || 22 }}
+          WEB_ROOT: ${{ secrets.WEB_ROOT }}
+        run: |
+          set -e
+          if [ -z "$SSH_HOST" ] || [ -z "$SSH_USER" ] || [ -z "$SSH_PRIVATE_KEY" ] || [ -z "$WEB_ROOT" ]; then
+            echo "缺少 Secrets：请确认已配置 SSH_HOST / SSH_USER / SSH_PRIVATE_KEY / WEB_ROOT"
+            exit 1
+          fi
+
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          rsync -avz --delete \
+            --exclude '.user.ini' \
+            --exclude '.htaccess' \
+            -e "ssh -i ~/.ssh/deploy_key -p $SSH_PORT -o StrictHostKeyChecking=accept-new" \
+            apps/web/dist/ \
+            "${SSH_USER}@${SSH_HOST}:${WEB_ROOT}/"
+
+          echo "Deploy done -> ${SSH_USER}@${SSH_HOST}:${WEB_ROOT}/"
