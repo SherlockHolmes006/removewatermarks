@@ -46,15 +46,32 @@ jobs:
           fi
 
           mkdir -p ~/.ssh
-          # 去掉 Windows 粘贴私钥可能带的 \r，避免 invalid format
+          # 去掉 \r；并打印首尾行便于排查（不打印中间密钥内容）
           printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
-          echo "==> 私钥指纹（用于确认密钥是否加载成功）"
-          ssh-keygen -lf ~/.ssh/deploy_key || {
-            echo "SSH_PRIVATE_KEY 格式不对。请重新复制本机 deploy_removewatermarks 私钥全文到 Secret"
+          echo "==> 密钥文件检查"
+          echo "行数: $(wc -l < ~/.ssh/deploy_key)"
+          echo "首行: $(head -n 1 ~/.ssh/deploy_key)"
+          echo "末行: $(tail -n 1 ~/.ssh/deploy_key)"
+
+          if ! grep -q "BEGIN .*PRIVATE KEY" ~/.ssh/deploy_key; then
+            echo "错误：Secret 里不是私钥。"
+            echo "正确首行应类似：-----BEGIN OPENSSH PRIVATE KEY-----"
+            echo "如果你贴的是 ssh-ed25519 AAAA... 那是公钥，不能用。"
             exit 1
-          }
+          fi
+
+          if ! ssh-keygen -y -f ~/.ssh/deploy_key >/tmp/derived.pub 2>/tmp/keyerr.txt; then
+            echo "错误：私钥无法解析："
+            cat /tmp/keyerr.txt
+            echo "请用记事本打开本机 deploy_removewatermarks，全选复制后更新 GitHub Secret。"
+            exit 1
+          fi
+
+          echo "==> 私钥可用，对应公钥为："
+          cat /tmp/derived.pub
+          ssh-keygen -lf /tmp/derived.pub || true
 
           echo "==> 测试 SSH"
           ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" \
